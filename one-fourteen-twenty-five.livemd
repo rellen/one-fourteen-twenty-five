@@ -1,0 +1,448 @@
+# Elixir and OTP release bonanza: 2022 edition
+
+## Elixir 1.14 Highlights
+
+### PartionSupervisor
+
+<!-- livebook:{"break_markdown":true} -->
+
+Existing approach to dynamic supervisors.  The `MyApp.DynamicSupervisor` process could be a bottle-neck
+
+```elixir
+Process.list() |> Enum.count() |> IO.inspect(label: "Starting process count")
+
+children = [
+  {DynamicSupervisor, name: MyApp.DynamicSupervisor}
+]
+
+Supervisor.start_link(children, strategy: :one_for_one)
+
+0..10000
+|> Enum.map(fn _ ->
+  Task.async(fn ->
+    DynamicSupervisor.start_child(MyApp.DynamicSupervisor, {Agent, fn -> %{} end})
+  end)
+end)
+|> Task.await_many(60_000)
+
+DynamicSupervisor.count_children(MyApp.DynamicSupervisor) |> IO.inspect(label: "children")
+
+DynamicSupervisor.stop(MyApp.DynamicSupervisor)
+Process.list() |> Enum.count() |> IO.inspect(label: "Ending process count")
+```
+
+`PartitionSupervisor` starts a child per core.  Children can be found with a `{:via, PartitionSupervisor, {name, key}}` via.
+
+```elixir
+Task.start(fn ->
+  Process.list() |> Enum.count() |> IO.inspect(label: "Starting process count")
+
+  children = [
+    {PartitionSupervisor, child_spec: DynamicSupervisor, name: MyApp.DynamicSupervisors}
+  ]
+
+  Supervisor.start_link(children, strategy: :one_for_one)
+
+  supervisors =
+    PartitionSupervisor.which_children(MyApp.DynamicSupervisors)
+    |> IO.inspect(label: "DynamicSupervisors")
+
+  0..10000
+  |> Enum.map(fn _ ->
+    Task.async(fn ->
+      DynamicSupervisor.start_child(
+        {:via, PartitionSupervisor, {MyApp.DynamicSupervisors, self()}},
+        {Agent, fn -> %{} end}
+      )
+    end)
+  end)
+  |> Task.await_many()
+
+  Enum.each(supervisors, fn {_, pid, _, _} ->
+    DynamicSupervisor.count_children(pid) |> IO.inspect(label: "#{inspect(pid)} children")
+  end)
+
+  PartitionSupervisor.stop(MyApp.DynamicSupervisors)
+  Process.list() |> Enum.count() |> IO.inspect(label: "Ending process count")
+end)
+```
+
+### DateTime parsing 📅
+
+<!-- livebook:{"break_markdown":true} -->
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+DateTime.from_iso8601("20150123T235007.123+0230", Calendar.ISO)        
+{:error, :invalid_format}
+```
+
+```elixir
+DateTime.from_iso8601("2015-01-23T23:50:07,123+02:30", Calendar.ISO)
+```
+
+```elixir
+DateTime.from_iso8601("2015-01-23T23:50:07,123+02:30", Calendar.ISO, :extended)
+```
+
+```elixir
+DateTime.from_iso8601("20150123T235007.123+0230", Calendar.ISO, :basic)
+```
+
+### 🚀 Floats and scientific notation
+
+```elixir
+(Float.pow(10.0, 15) * 1.23) |> IO.inspect(label: "would have been 1.23e15 in 1.13")
+(Float.pow(10.0, 16) * 1.23) |> IO.inspect()
+:ok
+```
+
+### 🔎 Inspect on structs - now shows fields in the order they are declared in `defstruct` &#65;&#90;&#8595;
+
+```elixir
+defmodule MyStruct do
+  defstruct [:bbb, :aaa, :ddd, :ccc]
+end
+
+%MyStruct{ddd: "ddd", ccc: "ccc", aaa: "aaa", bbb: "bbb"} |> IO.inspect()
+
+IO.puts(
+  "Would have been #{~s|%MyStruct{aaa: "aaa", bbb: "bbb", ccc: "ccc", ddd: "ddd"}|} in 1.13"
+)
+
+:ok
+```
+
+### 🔎 Inspect - expression-based inspection on `Date.Range`, `MapSet`, and `Version.Requirement` 🏗
+
+```elixir
+Date.range(~D[2022-05-25], ~D[2022-06-15]) |> IO.inspect()
+ms = MapSet.new(%{a: "aa", b: "bb", c: "cc"}) |> IO.inspect()
+ms |> MapSet.put(:d) |> IO.inspect()
+%Version.Requirement{} = Version.parse_requirement!("~> 1.7") |> IO.inspect()
+:ok
+```
+
+```elixir
+### paste here
+```
+
+### 💂 Allow guard expressions as the size of bitstring in a pattern match
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+<<as::binary-size(1+2), rest::binary>> = "aaabbbbcccc"
+```
+
+```
+** (CompileError) iex:1: size in bitstring expects an integer or a variable as argument, got: :erlang.+(1, 2)
+    (elixir 1.13.3) src/elixir_bitstring.erl:191: :elixir_bitstring.expand_each_spec/6
+    (elixir 1.13.3) src/elixir_bitstring.erl:160: :elixir_bitstring.expand_specs/7
+    (elixir 1.13.3) src/elixir_bitstring.erl:38: :elixir_bitstring.expand/8
+    (elixir 1.13.3) src/elixir_bitstring.erl:14: :elixir_bitstring.expand/5
+```
+
+```elixir
+<<as::binary-size(1 + 2), rest::binary>> = "aaabbbbcccc"
+as
+```
+
+### 🧷 Allow composite types with pins as the map key in a pattern match
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+key_part = :foo
+:foo
+iex(10)> %{{^key_part, :bar} => val} = %{{:foo, :bar} => "foobar", {:baz, :blah} => "bazblah"}
+```
+
+```
+** (CompileError) iex:10: cannot use pin operator ^key_part inside a data structure as a map key in a pattern. The pin operator can only be used as the whole key
+    (stdlib 3.17) lists.erl:1267: :lists.foldl/3
+```
+
+```elixir
+key_part = :foo
+%{{^key_part, :bar} => val} = %{{:foo, :bar} => "foobar", {:baz, :blah} => "bazblah"}
+val
+```
+
+### 🗡 New Kernel fuction `binary_slice/2,3`
+
+```elixir
+a_to_z =
+  ?a..?z
+  |> Enum.reduce("", fn x, acc -> <<acc::binary, x::8>> end)
+```
+
+```elixir
+a_to_z
+|> binary_slice(0..25//5)
+```
+
+```elixir
+binary_slice(<<1::16, 2::8, 3::8, 4::16, 5::8, 6::8, 7::16, 8::8>>, 1..11//2)
+```
+
+```elixir
+binary_slice("abcdefghi", 3, 4)
+```
+
+### 🗝 New `Keyword` / `Map` functions `from_keys/2`
+
+```elixir
+Keyword.from_keys([:foo, :bar, :baz], :atom)
+```
+
+### 🏖 New `Keyword` / `Map` functions `replace_lazy/3`
+
+<!-- livebook:{"break_markdown":true} -->
+
+`replace_lazy` replaces a field in a map or keyword list, ...erh, lazily
+
+```elixir
+Map.replace_lazy(%{a: "aaa", b: "bbb"}, :a, fn _ -> "AAA" end)
+```
+
+```elixir
+Map.replace_lazy(%{a: "aaa", b: "bbb"}, :c, fn _ -> "CCC" end)
+```
+
+This can be useful when the replacement function is expensive
+
+```elixir
+defmodule Fib do
+  def fib(n), do: fibp(1, 1, n)
+
+  defp fibp(a, _, 0) do
+    a
+  end
+
+  defp fibp(a, b, n) do
+    fibp(b, a + b, n - 1)
+  end
+end
+```
+
+```elixir
+{time, res} =
+  :timer.tc(fn -> Keyword.replace_lazy([a: 100_000, b: 2], :a, fn x -> Fib.fib(x) end) end)
+
+IO.inspect(time / 1_000, label: "milliseconds")
+IO.inspect(res, label: "result")
+:ok
+```
+
+```elixir
+{time, res} =
+  :timer.tc(fn -> Keyword.replace_lazy([a: 1, b: 2], :c, fn _ -> Fib.fib(1_000_000_000) end) end)
+
+IO.inspect(time / 1_000, label: "milliseconds")
+IO.inspect(res, label: "result")
+:ok
+```
+
+### ✅ ❌ New `MapSet` functions `filter/2` and `reject/2`
+
+```elixir
+0..10 |> MapSet.new() |> MapSet.filter(fn x -> rem(x, 2) == 0 end)
+```
+
+```elixir
+0..10 |> MapSet.new() |> MapSet.reject(fn x -> rem(x, 2) == 0 end)
+```
+
+### 📺 New `Stream` function `duplicate/2`
+
+```elixir
+Stream.duplicate(2, 5) |> Enum.to_list()
+```
+
+```elixir
+Stream.duplicate([1, 2, 3], 5) |> Enum.to_list()
+```
+
+### 🏃 `String.slice/2` accepts stepped ranges
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+String.slice("abcdefghij", 0..9//3)
+```
+
+```
+** (ArgumentError) String.slice/2 does not accept ranges with custom steps, got: 0..9//3
+    (elixir 1.13.3) lib/string.ex:2154: String.slice/2
+```
+
+```elixir
+String.slice("abcdefghij", 0..9//3)
+```
+
+## OTP 25 Highlights
+
+### 🦾 JIT on ARM
+
+The BEAM Just-in-Time compiler is now enabled on ARM devices --> 🍏 silicon 🔥
+
+<!-- livebook:{"break_markdown":true} -->
+
+### 🗺 New `maps` function `groups_from_list/2,3`
+
+```elixir
+Enum.group_by([1, 2, 3, 4], fn x -> rem(x, 2) == 0 end)
+```
+
+```elixir
+:maps.groups_from_list(fn x -> rem(x, 2) == 0 end, [1, 2, 3, 4])
+```
+
+```elixir
+:maps.groups_from_list(fn x -> rem(x, 2) == 0 end, fn x -> x * x end, [1, 2, 3, 4])
+```
+
+### 🔢 New`lists` function `enumerate/1,2`
+
+```elixir
+Enum.with_index([:a, :b, :c])
+```
+
+```elixir
+:lists.enumerate([:a, :b, :c])
+```
+
+```elixir
+:lists.enumerate(0, [:a, :b, :c])
+```
+
+### ❄ New `lists` function `uniq/1,2`
+
+```elixir
+Enum.uniq([3, 3, 1, 2, 1, 2, 3])
+```
+
+```elixir
+:lists.uniq([3, 3, 1, 2, 1, 2, 3])
+```
+
+```elixir
+:lists.uniq([:a, :a, 1, :b, 2, :a, 3])
+```
+
+```elixir
+:lists.uniq(fn {x, _} -> x end, [{:b, 2}, {:a, 1}, {:c, 3}, {:a, 2}])
+```
+
+### <span style="font-size: 48px">≟</span> Selectable features and the new `maybe_expr` feature
+
+Similar in intent to the `with` special form in Elixir
+
+```erlang
+-module(my_experiment).
+-export([foo/1]).
+
+%% Enable the feature maybe_expr in this module only
+%% Makes maybe a keyword which might be incompatible
+%% in modules using maybe as a function name or an atom
+-feature(maybe_expr,enable). 
+foo() ->
+  maybe
+    {ok, X} ?= f(Foo), %% Pattern ?= Expr is a MatchOrReturnExpr (like Pattern <- Expr)
+    [H|T] ?= g(X), %% X was bound from the previous expression
+    ...
+  else
+    {error, Y} ->
+        {ok, "default"};
+    {ok, _Term} ->
+        {error, "unexpected wrapper"}
+  end.
+```
+
+<!-- livebook:{"break_markdown":true} -->
+
+### <span style="font-size: 12px">101010</span> 🏗 Improved error information for failing binary construction
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+f = fn a,b,c,d -> <<a::float, b::binary-size(4), c::16, d::binary>> end
+#Function<41.65746770/4 in :erl_eval.expr/5>
+iex(3)> f.(2.0, <<"abc">>, 42, <<1::7>>)
+```
+
+```
+** (ArgumentError) argument error while evaluating iex at line 3
+```
+
+```elixir
+f = fn a, b, c, d -> <<a::float, b::binary-size(4), c::16, d::binary>> end
+f.(2.0, <<"abc">>, 42, <<1::7>>)
+```
+
+### 🧵 Adaptive write-concurrency in ETS
+
+```elixir
+:ets.new(:my_table, write_concurrency: :auto)
+```
+
+```elixir
+st = :ets.new(:sequential_table, [:public, {:write_concurrency, false}])
+ct = :ets.new(:concurrent_table, [:public, {:write_concurrency, :auto}])
+
+Benchee.run(
+  %{
+    "write_concurrency false" => fn -> :ets.insert(st, {Enum.random(0..100), :foo}) end,
+    "write_concurrency auto" => fn -> :ets.insert(ct, {Enum.random(0..100), :foo}) end
+  },
+  time: 5,
+  parallel: 8
+)
+
+:ets.delete(st)
+:ets.delete(ct)
+```
+
+```elixir
+st = :ets.new(:sequential_table, [:public, {:write_concurrency, false}])
+ct = :ets.new(:concurrent_table, [:public, {:write_concurrency, :auto}])
+
+Benchee.run(
+  %{
+    "write_concurrency false" => fn -> :ets.insert(st, {Enum.random(0..100), :foo}) end,
+    "write_concurrency auto" => fn -> :ets.insert(ct, {Enum.random(0..100), :foo}) end
+  },
+  time: 5,
+  parallel: 16
+)
+
+:ets.delete(st)
+:ets.delete(ct)
+```
+
+### ⛵ New option for `erlang:float_to_binary/2`
+
+```elixir
+:erlang.float_to_binary(1.23)
+```
+
+```elixir
+:erlang.float_to_binary(1.23, [:short])
+```
+
+```elixir
+Float.to_string(1.23)
+```
+
+## Ecosystem
+
+LiveBook, NX, Axon, Explorer, Scholar...oh my!
+
+* https://github.com/livebook-dev/livebook
+* https://github.com/elixir-nx/nx
+* https://github.com/elixir-nx/axon
+* https://github.com/elixir-nx/explorer
+* https://github.com/elixir-nx/scholar
+  ![](images/nx.png)
